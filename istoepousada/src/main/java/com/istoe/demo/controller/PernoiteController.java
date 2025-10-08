@@ -66,4 +66,12 @@ public class PernoiteController {
         List<Map<String, Object>> lista = pernoiteService.listarPorStatus(status);
         return ResponseEntity.ok(lista);
     }
+
+    @GetMapping("/{id}/detalhes")
+    public ResponseEntity<Map<String, Object>> buscarDetalhesPernoite(@PathVariable Long id) {
+        Map<String, Object> detalhes = pernoiteService.buscarDetalhesPernoitePorId(id);
+        return ResponseEntity.ok(detalhes);
+    }
+
+
 }

@@ -418,8 +418,6 @@ public class PernoiteRepository {
 
             formatado.put("valorTotal", row.get("valot_total"));
             formatado.put("ativo", row.get("ativo"));
-
-            // ✅ Nome e CPF do representante
             formatado.put("representanteNome", row.get("representante_nome"));
             formatado.put("representanteCpf", row.get("representante_cpf"));
 
@@ -428,6 +426,115 @@ public class PernoiteRepository {
 
         return respostaFormatada;
     }
+
+    public Map<String, Object> buscarDetalhesPernoitePorId(Long pernoiteId) {
+        Map<String, Object> response = new LinkedHashMap<>();
+
+        // 🔹 DADOS PRINCIPAIS DO PERNOITE
+        Map<String, Object> dadosReserva = jdbcTemplate.queryForMap("""
+        SELECT p.id, p.quarto_id, q.descricao AS quartoDescricao,
+               TO_CHAR(p.data_entrada, 'DD/MM/YYYY') AS data_entrada,
+               TO_CHAR(p.data_saida, 'DD/MM/YYYY') AS data_saida,
+               TO_CHAR(p.hora_chegada, 'HH24:MI') AS hora_chegada,
+               TO_CHAR(p.hora_saida, 'HH24:MI') AS hora_saida,
+               p.status_pernoite_enum AS status, 
+               p.valot_total AS valor_total
+        FROM pernoite p
+        JOIN quarto q ON q.id = p.quarto_id
+        WHERE p.id = ?
+    """, pernoiteId);
+
+        response.put("dadosReserva", dadosReserva);
+
+        // 🔹 BUSCA TODAS AS DIÁRIAS
+        List<Map<String, Object>> diarias = jdbcTemplate.queryForList("""
+        SELECT id, numero_diaria, 
+               TO_CHAR(data_inicio, 'DD/MM/YYYY') AS data_inicio, 
+               TO_CHAR(data_fim, 'DD/MM/YYYY') AS data_fim,
+               valor_diaria, total, quantidade_pessoa
+        FROM diaria
+        WHERE pernoite_id = ?
+        ORDER BY data_inicio
+    """, pernoiteId);
+
+        // 🔹 PARA CADA DIÁRIA, ADICIONA HÓSPEDES, CONSUMOS E PAGAMENTOS
+        for (Map<String, Object> diaria : diarias) {
+            Long diariaId = ((Number) diaria.get("id")).longValue();
+
+            // HÓSPEDES
+            List<Map<String, Object>> hospedes = jdbcTemplate.queryForList("""
+            SELECT p.id, p.nome, p.cpf, p.telefone, dh.representante
+            FROM diaria_hospedes dh
+            JOIN pessoa p ON p.id = dh.hospedes_id
+            WHERE dh.diaria_id = ?
+        """, diariaId);
+            diaria.put("hospedes", hospedes);
+
+            // CONSUMOS
+            List<Map<String, Object>> consumos = jdbcTemplate.queryForList("""
+            SELECT 
+                cd.id, 
+                i.descricao AS item, 
+                cd.quantidade,
+                TO_CHAR(cd.data_hora_consumo, 'DD/MM/YYYY HH24:MI') AS dataHora,
+                tp.descricao AS tipo_pagamento,
+                CASE 
+                    WHEN tp.descricao IS NULL THEN 'PENDENTE'
+                    ELSE 'PAGO'
+                END AS status_pagamento,
+                CASE 
+                    WHEN tp.descricao IS NULL THEN '#EF4444'  -- vermelho
+                    ELSE '#22C55E'  -- verde
+                END AS cor_status
+            FROM consumo_diaria cd
+            LEFT JOIN itens i ON i.id = cd.item_id
+            LEFT JOIN tipo_pagamento tp ON tp.id = cd.tipo_pagamento_id
+            WHERE cd.diaria_id = ?
+            ORDER BY cd.data_hora_consumo DESC
+        """, diariaId);
+            diaria.put("consumos", consumos);
+
+            // PAGAMENTOS
+            List<Map<String, Object>> pagamentos = jdbcTemplate.queryForList("""
+            SELECT 
+                dp.id, dp.valor,
+                TO_CHAR(dp.data_hora_pagamento, 'DD/MM/YYYY HH24:MI') AS dataHora,
+                tp.descricao AS tipo_pagamento
+            FROM diaria_pagamento dp
+            JOIN tipo_pagamento tp ON tp.id = dp.tipo_pagamento_id
+            WHERE dp.diaria_id = ?
+            ORDER BY dp.data_hora_pagamento DESC
+        """, diariaId);
+            diaria.put("pagamentos", pagamentos);
+        }
+
+        response.put("diarias", diarias);
+
+        // 🔹 RESUMO FINANCEIRO
+        Double valorTotal = (Double) dadosReserva.getOrDefault("valor_total", 0.0);
+
+        double totalPago = diarias.stream()
+                .flatMap(d -> ((List<Map<String, Object>>) d.get("pagamentos")).stream())
+                .mapToDouble(p -> ((Number) p.get("valor")).doubleValue())
+                .sum();
+
+        double faltaPagar = valorTotal - totalPago;
+        double percentualPago = valorTotal > 0 ? (totalPago / valorTotal) * 100 : 0;
+
+        Map<String, Object> resumoFinanceiro = Map.of(
+                "valorTotal", valorTotal,
+                "totalPago", totalPago,
+                "faltaPagar", faltaPagar,
+                "percentualPago", percentualPago
+        );
+
+        response.put("resumoFinanceiro", resumoFinanceiro);
+
+        return response;
+    }
+
+
+
 
 
 

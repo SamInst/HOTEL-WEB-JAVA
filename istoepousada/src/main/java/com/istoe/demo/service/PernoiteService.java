@@ -9,9 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 @Service
 public class PernoiteService {
@@ -82,4 +80,14 @@ public class PernoiteService {
     public List<Map<String, Object>> listarPorStatus(StatusPernoiteEnum status) {
         return pernoiteRepository.listarPorStatus(status);
     }
+
+    public Map<String, Object> buscarDetalhesPernoitePorId(Long pernoiteId) {
+        Map<String, Object> detalhes = pernoiteRepository.buscarDetalhesPernoitePorId(pernoiteId);
+        if (detalhes == null || detalhes.isEmpty()) {
+            throw new NoSuchElementException("Nenhum pernoite encontrado para o ID informado.");
+        }
+        return detalhes;
+    }
+
+
 }
