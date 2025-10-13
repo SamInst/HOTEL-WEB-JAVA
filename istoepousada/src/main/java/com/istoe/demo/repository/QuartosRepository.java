@@ -58,6 +58,7 @@ public class QuartosRepository {
         List<Object> params = new ArrayList<>();
         StringBuilder sqlBuilder = new StringBuilder();
 
+        // QUERY PRINCIPAL AJUSTADA PARA RELACIONAR HÓSPEDES PELA DIARIA
         sqlBuilder.append("""
             WITH room_status AS (
                 SELECT 
@@ -70,50 +71,35 @@ public class QuartosRepository {
                     q.qtd_beliche,
                     q.status_quarto_enum,
                     c.categoria,
-                    
-                    -- Dados do pernoite ativo
-                    p.id as pernoite_id,
-                    p.data_entrada,
-                    p.data_saida,
-                    p.hora_chegada,
-                    p.hora_saida,
-                    p.quantidade_pessoa as acompanhantes,
-                    
-                    -- Dados da pessoa (representante)
+
+                    -- Diaria (agora principal fonte de pessoas)
+                    d.id as diaria_id,
+                    d.data_inicio,
+                    d.data_fim,
+                    d.quantidade_pessoa,
+
+                    -- Dados do responsável/hóspede principal na diaria
                     pe.id as pessoa_id,
                     pe.nome,
                     pe.cpf,
                     pe.telefone,
-                    
-                    -- Dados de diária encerrada (day use)
-                    d.id as diaria_id,
-                    d.data_inicio as diaria_data_inicio,
-                    d.data_fim as diaria_data_fim,
-                    
-                    ROW_NUMBER() OVER (PARTITION BY q.id ORDER BY p.data_entrada DESC NULLS LAST) as rn
-                    
+
+                    ROW_NUMBER() OVER (PARTITION BY q.id ORDER BY d.data_inicio DESC NULLS LAST) as rn
+
                 FROM quarto q
                 LEFT JOIN categoria c ON q.fk_categoria = c.id
-                LEFT JOIN pernoite p ON q.id = p.quarto_id 
-                    AND p.ativo = true 
-                    AND (p.data_entrada <= ? AND p.data_saida >= ?)
-                LEFT JOIN diaria d ON p.id = d.pernoite_id
-                LEFT JOIN pessoa pe ON p.id = (
-                    SELECT p2.id 
-                    FROM pernoite p2 
-                    WHERE p2.quarto_id = q.id 
-                    AND p2.ativo = true
-                    AND p2.data_entrada <= ? AND p2.data_saida >= ?
-                    ORDER BY p2.data_entrada ASC
-                    LIMIT 1
-                )
+                LEFT JOIN diaria d ON q.id = d.quarto_id 
+                    AND (d.data_inicio <= ? AND d.data_fim >= ?) -- filtro por periodo
+
+                -- JOIN com pessoa do representante na diaria (diaria_hospedes)
+                LEFT JOIN diaria_hospedes dh ON d.id = dh.diaria_id AND dh.representante = true
+                LEFT JOIN pessoa pe ON dh.hospedes_id = pe.id
                 WHERE 1=1
             """);
 
-        // Parâmetros para verificação de data no pernoite (4 vezes)
-        for (int i = 0; i < 4; i++) {
-            params.add(date);
-        }
+        // Parâmetros de data (2 vezes)
+        params.add(date);
+        params.add(date);
 
         // Filtro de status
         if (status != null) {
@@ -138,18 +124,16 @@ public class QuartosRepository {
         return new QueryBuilderResult(sqlBuilder.toString(), params);
     }
 
-    // Classe auxiliar para retornar SQL e parâmetros
+    // Classe auxiliar
     private static class QueryBuilderResult {
         final String sql;
         final List<Object> params;
-
         QueryBuilderResult(String sql, List<Object> params) {
             this.sql = sql;
             this.params = params;
         }
     }
 
-    // Classe auxiliar apenas para carregar categoria junto com room
     private static class RoomWithCategoryInfo {
         final String categoria;
         final RoomsResponse.Categoria.Room room;
@@ -160,75 +144,66 @@ public class QuartosRepository {
         }
     }
 
+    // MAPEAMENTO AJUSTADO PARA HÓSPEDES VIA DIARIA
     private class RoomRowMapper implements RowMapper<RoomWithCategoryInfo> {
         @Override
         public RoomWithCategoryInfo mapRow(ResultSet rs, int rowNum) throws SQLException {
             String categoria = rs.getString("categoria");
-
             RoomStatusEnum roomStatus = determineRoomStatus(rs);
 
-            Long pernoiteId = (Long) rs.getObject("pernoite_id");
+            // Holder representa o hóspede principal da diaria
             RoomsResponse.Categoria.Room.Holder holder = null;
-
-            if (pernoiteId != null && (roomStatus == RoomStatusEnum.OCUPADO || roomStatus == RoomStatusEnum.RESERVADO)) {
-                holder = findPersonHolder(pernoiteId);
-            }
-
-            RoomsResponse.Categoria.Room.DayUse dayUse = null;
             Long diariaId = (Long) rs.getObject("diaria_id");
-
-            if (roomStatus == RoomStatusEnum.DIARIA_ENCERRADA && diariaId != null) {
-                dayUse = new RoomsResponse.Categoria.Room.DayUse(
-                        diariaId,
-                        rs.getDate("diaria_data_inicio") != null ? rs.getDate("diaria_data_inicio").toLocalDate() : null,
-                        rs.getTime("hora_chegada") != null ? rs.getTime("hora_chegada").toLocalTime() : null,
-                        rs.getTime("hora_saida") != null ? rs.getTime("hora_saida").toLocalTime() : null
-                );
+            if (diariaId != null) {
+                holder = findDiariaHolder(diariaId);
             }
 
+            // Dados do Room
             RoomsResponse.Categoria.Room room = new RoomsResponse.Categoria.Room(
                     rs.getLong("quarto_id"),
                     roomStatus,
-                    rs.getInt("quantidade_pessoas"),
+                    rs.getInt("quantidade_pessoa"),
                     rs.getInt("qtd_cama_solteiro"),
                     rs.getInt("qtd_cama_casal"),
                     rs.getInt("qtd_beliche"),
                     rs.getInt("qtd_rede"),
                     holder,
-                    dayUse
+                    null // dayUse, adicione lógica se for usar
             );
-
             return new RoomWithCategoryInfo(categoria, room);
         }
 
         private RoomStatusEnum determineRoomStatus(ResultSet rs) throws SQLException {
             Integer statusEnum = (Integer) rs.getObject("status_quarto_enum");
+            return statusEnum != null ? RoomStatusEnum.values()[statusEnum] : RoomStatusEnum.DISPONIVEL;
+        }
+    }
 
-            if (statusEnum != null) {
-                return RoomStatusEnum.values()[statusEnum];
-            }
-
-            LocalDate today = LocalDate.now();
-            Long pernoiteId = (Long) rs.getObject("pernoite_id");
-
-            if (pernoiteId != null) {
-                LocalDate dataEntrada = rs.getDate("data_entrada") != null ?
-                        rs.getDate("data_entrada").toLocalDate() : null;
-                LocalDate dataSaida = rs.getDate("data_saida") != null ?
-                        rs.getDate("data_saida").toLocalDate() : null;
-
-                if (dataEntrada != null && dataSaida != null) {
-                    if (dataEntrada.isAfter(today)) {
-                        return RoomStatusEnum.RESERVADO;
-                    } else if (!dataEntrada.isAfter(today) && !dataSaida.isBefore(today)) {
-                        return RoomStatusEnum.OCUPADO;
-                    } else if (dataSaida.isBefore(today)) {
-                        return RoomStatusEnum.DIARIA_ENCERRADA;
-                    }
-                }
-            }
-
-            return RoomStatusEnum.DISPONIVEL;
+    // Novo método para buscar responsável na diária
+    private RoomsResponse.Categoria.Room.Holder findDiariaHolder(Long diariaId) {
+        if (diariaId == null) return null;
+        String sql = """
+            SELECT 
+                pe.id, pe.nome, pe.cpf, pe.telefone
+            FROM diaria_hospedes dh
+            JOIN pessoa pe ON dh.hospedes_id = pe.id
+            WHERE dh.diaria_id = ? AND dh.representante = true
+            LIMIT 1
+        """;
+        try {
+            return jdbcTemplate.queryForObject(sql, new Object[]{diariaId}, (rs, rowNum) ->
+                    new RoomsResponse.Categoria.Room.Holder(
+                            (Long) rs.getObject("id"),
+                            rs.getString("nome"),
+                            rs.getString("cpf"),
+                            rs.getString("telefone"),
+                            null, // acompanhantes, ajuste se necessário
+                            null, null, null, null // datas/horas, ajuste se necessário
+                    )
+            );
+        } catch (Exception e) {
+            System.err.println("Erro ao buscar representante da diaria " + diariaId + ": " + e.getMessage());
+            return null;
         }
     }
 
@@ -237,48 +212,8 @@ public class QuartosRepository {
         return jdbcTemplate.query(sql, ObjetoResponse.ROW_MAPPER);
     }
 
-
-    private RoomsResponse.Categoria.Room.Holder findPersonHolder(Long pernoiteId) {
-        if (pernoiteId == null) return null;
-
-        String sql = """
-        SELECT pe.id, pe.nome, pe.cpf, pe.telefone, p.quantidade_pessoa as acompanhantes,
-               p.data_entrada, p.data_saida, p.hora_chegada, p.hora_saida
-        FROM pernoite p
-        JOIN pernoite_pessoas pp
-          ON pp.pernoite_id = p.id
-         AND pp.representante = TRUE
-        JOIN pessoa pe
-          ON pe.id = pp.pessoas_id
-        WHERE p.id = ? AND p.ativo = true
-        """;
-
-        try {
-            return jdbcTemplate.queryForObject(sql, new Object[]{pernoiteId}, (rs, rowNum) ->
-                    new RoomsResponse.Categoria.Room.Holder(
-                            (Long) rs.getObject("id"),
-                            rs.getString("nome"),
-                            rs.getString("cpf"),
-                            rs.getString("telefone"),
-                            rs.getInt("acompanhantes"),
-                            rs.getDate("data_entrada") != null ? rs.getDate("data_entrada").toLocalDate() : null,
-                            rs.getDate("data_saida") != null ? rs.getDate("data_saida").toLocalDate() : null,
-                            rs.getTime("hora_chegada") != null ? rs.getTime("hora_chegada").toLocalTime() : null,
-                            rs.getTime("hora_saida") != null ? rs.getTime("hora_saida").toLocalTime() : null
-                    )
-            );
-        } catch (Exception e) {
-            System.err.println("Erro ao buscar representante do pernoite " + pernoiteId + ": " + e.getMessage());
-            return null;
-        }
-    }
-
     public List<CategoriaResponse> listarCategorias() {
-        final String sql = """
-            SELECT id, categoria
-            FROM categoria
-            ORDER BY categoria
-        """;
+        final String sql = "SELECT id, categoria FROM categoria ORDER BY categoria";
         return jdbcTemplate.query(sql, (rs, i) ->
                 new CategoriaResponse(rs.getLong("id"), rs.getString("categoria"))
         );
@@ -297,13 +232,12 @@ public class QuartosRepository {
                 fk_categoria
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """;
-
         KeyHolder kh = new GeneratedKeyHolder();
         jdbcTemplate.update(conn -> {
             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, req.descricao());
             ps.setObject(2, req.quantidadePessoas());
-            ps.setObject(3, req.statusCodigo()); // SMALLINT no banco (int2) – ok passar int
+            ps.setObject(3, req.statusCodigo());
             ps.setObject(4, req.qtdCamaCasal());
             ps.setObject(5, req.qtdCamaSolteiro());
             ps.setObject(6, req.qtdRede());
