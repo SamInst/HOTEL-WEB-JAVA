@@ -16,6 +16,7 @@ public record RoomsResponse(
     ){
         public record Room(
                 Long id,
+                String info,
                 RoomStatusEnum roomStatusEnum,
                 Integer roomCapacity,
                 Integer singleBedAmount,
